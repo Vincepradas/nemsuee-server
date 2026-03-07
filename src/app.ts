@@ -5,18 +5,24 @@ import morgan from "morgan";
 import { apiRouter } from "./routes/index.js";
 
 export const app = express();
+app.set("trust proxy", 1);
 
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL || "")
+const envOrigins = (process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL || "")
   .split(",")
   .map((v) => v.trim())
   .filter(Boolean);
+const devOrigins =
+  process.env.NODE_ENV === "production"
+    ? []
+    : ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"];
+const allowedOrigins = Array.from(new Set([...envOrigins, ...devOrigins]));
 
 app.use(
   cors({
     origin: (origin, cb) => {
       if (!origin) return cb(null, true);
       if (!allowedOrigins.length || allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error("CORS blocked"));
+      return cb(null, false);
     },
     credentials: true,
   }),

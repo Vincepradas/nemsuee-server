@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { requireAuth, requireRole } from "../middleware/auth.js";
+import { AUTH_COOKIE_NAME, requireAuth, requireRole } from "../middleware/auth.js";
 import {
   decisionSchema,
   loginSchema,
@@ -16,6 +16,22 @@ import {
 } from "../modules/auth/auth.service.js";
 
 const router = Router();
+
+function getCookieOptions(req: any) {
+  const host = String(req.hostname || "").toLowerCase();
+  const isLocalHost =
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host.endsWith(".local");
+  const secure = !isLocalHost;
+  return {
+    httpOnly: true,
+    secure,
+    sameSite: (secure ? "none" : "lax") as "none" | "lax",
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    path: "/",
+  };
+}
 
 router.post("/register", async (req, res) => {
   const parsed = registerSchema.safeParse(req.body);
@@ -37,12 +53,21 @@ router.post("/login", async (req, res) => {
 
   try {
     const payload = await loginUser(parsed.data);
-    return res.json(payload);
+    res.cookie(AUTH_COOKIE_NAME, payload.token, getCookieOptions(req));
+    return res.json({ user: payload.user });
   } catch (err) {
     return res
       .status((err as any).status || 500)
       .json({ message: (err as Error).message });
   }
+});
+
+router.post("/logout", (req, res) => {
+  res.clearCookie(AUTH_COOKIE_NAME, {
+    ...getCookieOptions(req),
+    maxAge: undefined,
+  });
+  res.status(204).send();
 });
 
 router.post("/promote-admin", async (req, res) => {
