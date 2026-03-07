@@ -10,6 +10,7 @@ datasource db {
 enum Role {
   STUDENT
   INSTRUCTOR
+  ADMIN
 }
 
 enum EnrollmentStatus {
@@ -29,12 +30,14 @@ model User {
   attempts     Attempt[]
   drive        GoogleDriveConnection?
   enrollments  Enrollment[]
+  blockAssignments BlockInstructor[]
 }
 
 model Course {
   id           Int      @id @default(autoincrement())
   title        String
   description  String
+  isArchived   Boolean  @default(false)
   enrollmentKey String
   instructorId Int
   createdAt    DateTime @default(now())
@@ -124,6 +127,19 @@ model Section {
   course      Course       @relation(fields: [courseId], references: [id], onDelete: Cascade)
   lessons     Lesson[]
   enrollments Enrollment[]
+  instructors BlockInstructor[]
 
   @@unique([courseId, name])
+}
+
+model BlockInstructor {
+  id           Int      @id @default(autoincrement())
+  sectionId    Int
+  instructorId Int
+  role         String?
+  createdAt    DateTime @default(now())
+  section      Section  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  instructor   User     @relation(fields: [instructorId], references: [id], onDelete: Cascade)
+
+  @@unique([sectionId, instructorId])
 }

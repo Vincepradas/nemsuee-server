@@ -17,6 +17,7 @@ export async function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT NOT NULL,
       description TEXT NOT NULL,
+      isArchived INTEGER NOT NULL DEFAULT 0,
       enrollmentKey TEXT NOT NULL DEFAULT 'NEMSU001',
       instructorId INTEGER NOT NULL,
       createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -32,6 +33,14 @@ export async function initDb() {
     // Column already exists in existing databases.
   }
 
+  try {
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE Course ADD COLUMN isArchived INTEGER NOT NULL DEFAULT 0;
+    `);
+  } catch {
+    // Column already exists in existing databases.
+  }
+
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS Section (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +49,19 @@ export async function initDb() {
       createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (courseId) REFERENCES Course(id) ON DELETE CASCADE,
       UNIQUE(courseId, name)
+    );
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS BlockInstructor (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sectionId INTEGER NOT NULL,
+      instructorId INTEGER NOT NULL,
+      role TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (sectionId) REFERENCES Section(id) ON DELETE CASCADE,
+      FOREIGN KEY (instructorId) REFERENCES User(id) ON DELETE CASCADE,
+      UNIQUE(sectionId, instructorId)
     );
   `);
 
@@ -72,6 +94,13 @@ export async function initDb() {
     WHERE NOT EXISTS (
       SELECT 1 FROM Section s WHERE s.courseId = c.id
     );
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    INSERT OR IGNORE INTO BlockInstructor (sectionId, instructorId, role)
+    SELECT s.id, c.instructorId, 'PRIMARY'
+    FROM Section s
+    JOIN Course c ON c.id = s.courseId;
   `);
 
   await prisma.$executeRawUnsafe(`
@@ -129,12 +158,21 @@ export async function initDb() {
       googleEmail TEXT,
       accessToken TEXT NOT NULL,
       refreshToken TEXT,
+      personalFolderId TEXT,
       expiryDate BIGINT,
       createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (userId) REFERENCES User(id) ON DELETE CASCADE
     );
   `);
+
+  try {
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE GoogleDriveConnection ADD COLUMN personalFolderId TEXT;
+    `);
+  } catch {
+    // Column already exists in existing databases.
+  }
 
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS Enrollment (
@@ -149,6 +187,20 @@ export async function initDb() {
       FOREIGN KEY (studentId) REFERENCES User(id) ON DELETE CASCADE,
       FOREIGN KEY (sectionId) REFERENCES Section(id) ON DELETE SET NULL,
       UNIQUE(courseId, studentId)
+    );
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS InstructorApplication (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId INTEGER NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      reviewedBy INTEGER,
+      reviewedAt DATETIME,
+      note TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES User(id) ON DELETE CASCADE,
+      FOREIGN KEY (reviewedBy) REFERENCES User(id) ON DELETE SET NULL
     );
   `);
 

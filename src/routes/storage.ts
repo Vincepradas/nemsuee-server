@@ -1,28 +1,32 @@
 import { Router } from "express";
-import jwt from "jsonwebtoken";
+import { Readable } from "node:stream";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
-import { buildGoogleConnectUrl, getAuthorizedDriveClient, getGoogleOAuthClient, storeGoogleTokens } from "../services/googleDrive.js";
+import {
+  buildGoogleConnectUrl,
+  ensureUserPersonalFolder,
+  getAuthorizedDriveClient,
+  getGoogleDriveMode,
+  getGoogleOAuthClient,
+  storeGoogleTokens,
+} from "../services/googleDrive.js";
+import {
+  getFrontendUrl,
+  shouldMakeUploadedFilesPublic,
+} from "./storage/config.js";
+import { parseState, signState } from "./storage/state.js";
 
 const router = Router();
 
-function getFrontendUrl() {
-  return process.env.FRONTEND_URL || "http://localhost:5173";
-}
-
-function signState(userId: number) {
-  return jwt.sign({ userId, type: "google-link" }, process.env.JWT_SECRET || "", { expiresIn: "10m" });
-}
-
-function parseState(state: string) {
-  const decoded = jwt.verify(state, process.env.JWT_SECRET || "") as { userId: number; type: string };
-  if (decoded.type !== "google-link") throw new Error("invalid state");
-  return decoded.userId;
-}
-
 router.get("/google/connect-url", requireAuth, async (req, res) => {
   try {
+    if (getGoogleDriveMode() === "service_account") {
+      return res.status(400).json({
+        message:
+          "Google Drive is configured via service account. Linking is not required.",
+      });
+    }
     const url = buildGoogleConnectUrl(signState(req.auth!.userId));
     res.json({ url });
   } catch (err) {
@@ -31,6 +35,10 @@ router.get("/google/connect-url", requireAuth, async (req, res) => {
 });
 
 router.get("/google/callback", async (req, res) => {
+  if (getGoogleDriveMode() === "service_account") {
+    return res.redirect(`${getFrontendUrl()}?drive=connected`);
+  }
+
   const code = typeof req.query.code === "string" ? req.query.code : "";
   const state = typeof req.query.state === "string" ? req.query.state : "";
 
@@ -48,18 +56,39 @@ router.get("/google/callback", async (req, res) => {
 });
 
 router.get("/google/status", requireAuth, async (req, res) => {
-  const connection = await prisma.googleDriveConnection.findUnique({ where: { userId: req.auth!.userId } });
-  res.json({ linked: !!connection, googleEmail: connection?.googleEmail || null });
+  if (getGoogleDriveMode() === "service_account") {
+    return res.json({
+      linked: true,
+      mode: "service_account",
+      googleEmail: null,
+    });
+  }
+
+  const connection = await prisma.googleDriveConnection.findUnique({
+    where: { userId: req.auth!.userId },
+  });
+  res.json({
+    linked: !!connection,
+    mode: "oauth",
+    googleEmail: connection?.googleEmail || null,
+  });
 });
 
 router.get("/google/files", requireAuth, async (req, res) => {
   const linked = await getAuthorizedDriveClient(req.auth!.userId);
-  if (!linked) return res.status(404).json({ message: "Google Drive not linked" });
+  if (!linked)
+    return res.status(404).json({ message: "Google Drive not linked" });
+  const folderId =
+    linked.mode === "oauth"
+      ? await ensureUserPersonalFolder(req.auth!.userId)
+      : process.env.GOOGLE_DRIVE_FOLDER_ID || null;
 
   const result = await linked.drive.files.list({
     pageSize: 20,
     fields: "files(id,name,mimeType,webViewLink,modifiedTime,size)",
-    q: "trashed=false"
+    q: folderId
+      ? `'${folderId}' in parents and trashed=false`
+      : "trashed=false",
   });
 
   return res.json(result.data.files || []);
@@ -67,8 +96,9 @@ router.get("/google/files", requireAuth, async (req, res) => {
 
 const uploadSchema = z.object({
   name: z.string().min(1),
-  content: z.string().min(1),
-  mimeType: z.string().min(1).optional()
+  content: z.string().min(1).optional(),
+  contentBase64: z.string().min(1).optional(),
+  mimeType: z.string().min(1).optional(),
 });
 
 router.post("/google/upload", requireAuth, async (req, res) => {
@@ -76,32 +106,82 @@ router.post("/google/upload", requireAuth, async (req, res) => {
   if (!parsed.success) return res.status(400).json(parsed.error.flatten());
 
   const linked = await getAuthorizedDriveClient(req.auth!.userId);
-  if (!linked) return res.status(404).json({ message: "Google Drive not linked" });
+  if (!linked)
+    return res.status(404).json({ message: "Google Drive not linked" });
+  const folderId =
+    linked.mode === "oauth"
+      ? await ensureUserPersonalFolder(req.auth!.userId)
+      : process.env.GOOGLE_DRIVE_FOLDER_ID || null;
 
-  const created = await linked.drive.files.create({
-    requestBody: { name: parsed.data.name },
-    media: {
-      mimeType: parsed.data.mimeType || "text/plain",
-      body: Buffer.from(parsed.data.content, "utf8")
-    },
-    fields: "id,name,webViewLink"
-  });
+  try {
+    const created = await linked.drive.files.create({
+      requestBody: {
+        name: parsed.data.name,
+        parents: folderId ? [folderId] : undefined,
+      },
+      media: {
+        mimeType: parsed.data.mimeType || "text/plain",
+        body: Readable.from(
+          parsed.data.contentBase64
+            ? Buffer.from(parsed.data.contentBase64, "base64")
+            : Buffer.from(parsed.data.content || "", "utf8"),
+        ),
+      },
+      fields: "id,name,webViewLink",
+    });
 
-  res.status(201).json(created.data);
+    if (created.data.id && shouldMakeUploadedFilesPublic()) {
+      await linked.drive.permissions.create({
+        fileId: created.data.id,
+        requestBody: {
+          role: "reader",
+          type: "anyone",
+          allowFileDiscovery: false,
+        },
+      });
+    }
+
+    res.status(201).json(created.data);
+  } catch (err: any) {
+    const driveMessage = String(
+      err?.response?.data?.error?.message ||
+        err?.cause?.message ||
+        err?.message ||
+        "",
+    );
+
+    if (driveMessage.includes("Service Accounts do not have storage quota")) {
+      return res.status(403).json({
+        message:
+          "Service account uploads require a Shared Drive or OAuth-linked personal Google account.",
+      });
+    }
+
+    throw err;
+  }
 });
 
 router.delete("/google/disconnect", requireAuth, async (req, res) => {
-  const connection = await prisma.googleDriveConnection.findUnique({ where: { userId: req.auth!.userId } });
+  if (getGoogleDriveMode() === "service_account") {
+    return res.status(204).send();
+  }
+
+  const connection = await prisma.googleDriveConnection.findUnique({
+    where: { userId: req.auth!.userId },
+  });
   if (!connection) return res.status(204).send();
 
   try {
     const client = getGoogleOAuthClient();
-    if (connection.accessToken) await client.revokeToken(connection.accessToken);
+    if (connection.accessToken)
+      await client.revokeToken(connection.accessToken);
   } catch {
     // Ignore revoke failures; local unlink still proceeds.
   }
 
-  await prisma.googleDriveConnection.delete({ where: { userId: req.auth!.userId } });
+  await prisma.googleDriveConnection.delete({
+    where: { userId: req.auth!.userId },
+  });
   res.status(204).send();
 });
 
