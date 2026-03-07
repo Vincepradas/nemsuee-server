@@ -3,7 +3,13 @@ import { z } from "zod";
 export const registerSchema = z.object({
   fullName: z.string().min(2),
   email: z.string().email(),
-  password: z.string().min(6),
+  password: z
+    .string()
+    .min(8, "Password must be at least 8 characters")
+    .regex(/[A-Z]/, "Password must include an uppercase letter")
+    .regex(/[a-z]/, "Password must include a lowercase letter")
+    .regex(/[0-9]/, "Password must include a number")
+    .regex(/[^A-Za-z0-9]/, "Password must include a special character"),
   role: z.enum(["STUDENT", "INSTRUCTOR"]),
   studentId: z
     .string()
@@ -12,6 +18,14 @@ export const registerSchema = z.object({
     .max(30)
     .regex(/^[A-Za-z0-9-]+$/, "Student ID must be alphanumeric (dash allowed)")
     .optional(),
+}).superRefine((data, ctx) => {
+  if (data.role === "STUDENT" && !data.studentId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["studentId"],
+      message: "Student ID is required for student registration",
+    });
+  }
 });
 
 export const loginSchema = z.object({
